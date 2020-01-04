@@ -342,6 +342,7 @@ kernel的high meomroy（高端内存）到底是什么？
 ![dir_inode.jpg](dir_inode.jpg)
 
 ### 软链接和硬链接
+
 硬链接与原始文件共用一个 inode 的，但是 inode 是不跨文件系统的，每个文件系统都有自己的 inode 列表，因而硬链接是没有办法跨文件系统的。而软链接不同，软链接相当于重新创建了一个文件。这个文件也有独立的 inode，只不过打开这个文件看里面内容的时候，内容指向另外的一个文件。这就很灵活了。我们可以跨文件系统，甚至目标文件被删除了，链接文件还是在的，只不过指向的文件找不到了而已。
 
 ![hardlink_softlink.jpg](hardlink_softlink.jpg)
@@ -374,7 +375,6 @@ Linux 为了提高目录项对象的处理效率，设计与实现了目录项�
 文件删除：文件被删除了，相应的 dentry 应该释放回 Slub 分配器；  
 结构复用：当需要分配一个 dentry，但是无法分配新的，就从 LRU 表中取出一个来复用。
 
-
 ## 中断
 
 ## 设备管理
@@ -382,3 +382,49 @@ Linux 为了提高目录项对象的处理效率，设计与实现了目录项�
 ## 网络
 
 ## 系统初始化
+
+### BIOS阶段
+
+在主板上有个ROM，ROM里面保存BIOS的程序，上电的时候，x86的第一个1M空间会映射到ROM去，将寄存器 CS 设置为 0xFFFF，将 IP 设置为 0x0000，所以第一条指令就会指向 0xFFFF0，正是在 ROM 的范围内。在这里，有一个 JMP 命令会跳到 ROM 中做初始化工作的代码，于是，BIOS 开始进行初始化的工作。
+
+检查硬件，建立中断向量表和中断相应程序。
+
+### bootloader 时期
+
+* BIOS 完成任务后，会将 boot.img 从硬盘加载到内存中的 0x7c00 来运行。  
+在 Linux 里面有一个工具（bootloader），叫 Grub2，全称 Grand Unified Bootloader Version 2。Grub2第一个要安装的就是 boot.img。它由 boot.S 编译而成，一共 512 字节，正式安装到启动盘的第一个扇区。这个扇区通常称为 MBR（Master Boot Record，主引导记录 / 扇区）。  
+启动盘一般在第一个扇区，占 512 字节，而且以 0xAA55 结束。这是一个约定，当满足这个条件的时候，就说明这是一个启动盘，在 512 字节以内会启动相关的代码。  
+
+* 由于 512 个字节实在有限，boot.img 做不了太多的事情。它能做的最重要的一个事情就是加载 grub2 的另一个镜像 core.img。  
+core.img 由 lzma_decompress.img、diskboot.img、kernel.img 和一系列的模块组成，功能比较丰富，能做很多事情。
+
+* boot.img 先加载的是 core.img 的第一个扇区。如果从硬盘启动的话，这个扇区里面是 diskboot.img，对应的代码是 diskboot.S  
+
+* boot.img将控制权交给 diskboot.img 后，diskboot.img 的任务就是将 core.img 的其他部分加载进来。先是解压缩程序 lzma_decompress.img，再往下是 kernel.img，最后是各个模块 module 对应的映像。**这里需要注意，它不是 Linux 的内核，而是 grub 的内核。** lzma_decompress.img 对应的代码是 startup_raw.S，本来 kernel.img 是压缩过的，现在执行的时候，需要解压缩。在这之前，我们所有遇到过的程序都非常非常小，完全可以在实模式下运行，但是随着我们加载的东西越来越大，实模式这 1M 的地址空间实在放不下了，所以在真正的解压缩之前，lzma_decompress.img 做了一个重要的决定，就是调用 real_to_prot，切换到保护模式，这样就能在更大的寻址空间里面，加载更多的东西。
+![diskboot.jpg](diskboot.jpg)
+
+### 从实模式切换到保护模式
+
+* 启动分段，启动分页
+
+* 打开 Gate A20，也就是第 21 根地址线的控制线。在实模式 8086 下面，一共就 20 个地址线，可访问 1M 的地址空间。如果超过了这个限度怎么办呢？当然是绕回来了。在保护模式下，第 21 根要起作用了，于是我们就需要打开 Gate A20。
+
+* 对压缩过的 kernel.img 进行解压缩，然后跳转到 kernel.img 开始运行。kernel.img 对应的代码是 startup.S 以及一堆 c 文件，在 startup.S 中会调用 grub_main，这是 grub kernel 的主函数。
+  * 开始调用 grub_menu_execute_entry()
+  * grub_cmd_linux() 函数会被调用，它会首先读取 Linux 内核镜像头部的一些数据结构，放到内存中的数据结构来，进行检查。如果检查通过，则会读取整个 Linux 内核镜像到内存。
+  * 如果配置文件里面还有 initrd 命令，用于为即将启动的内核传递 init ramdisk 路径。于是 grub_cmd_initrd() 函数会被调用，将 initramfs 加载到内存中来。
+  * 当这些事情做完之后，grub_command_execute (“boot”, 0, 0) 才开始真正地启动内核。
+
+### 内核启动
+
+内核的启动从入口函数 start_kernel() 开始。在 init/main.c 文件中，start_kernel 相当于内核的 main 函数。打开这个函数，你会发现，里面是各种各样初始化函数 XXXX_init。
+
+* 初始化进程管理，Process List及0号进程
+* 设置中断和trap
+* 初始化内存管理
+* 初始化调度模块
+* 初始化文件系统（rootfs）
+* 初始化1号进程（从ramdisk启动，因为此时还没有硬件驱动）
+* 切到用户态，先根据存储系统的类型加载驱动，有了驱动就可以设置真正的根文件系统了
+* 启动文件系统的1号进程
+* 启动2号进程  
